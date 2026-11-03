@@ -1,6 +1,8 @@
 """
 PTSFC 2026/27 - BASELINE PIPELINE
 Usage (from this directory):   python run_pipeline.py
+
+Hallo
 """
 import os
 import shutil
