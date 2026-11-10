@@ -6,6 +6,42 @@ what was fixed and the limitations of the historical experiment report.
 
 ## Setup and weekly submission
 
+The improved workflow (team **MonteCarloMafia**) is now:
+
+```powershell
+python -m pip install -r requirements.txt
+python run_improved.py --date 2026-11-11
+```
+
+It refreshes observations, retrieves cached or new fixed-run ECMWF forecasts,
+runs 52 evaluation weeks after 26 warmup weeks, and writes a checked 24-row
+submission plus predictions, backtests and plots into
+`output/improved/20261111/`. Start with `RESULTS.md` in that directory.
+The submission is `20261111_MonteCarloMafia.csv`; it is also copied to a
+timestamped path under `archive/improved/20261111/`.
+
+**Refresh on Wednesday before handing in.** A Tuesday run is a usable early
+forecast, labelled a preview in its metadata; Wednesday's refresh can use newer
+observations. The run intentionally uses Tuesday 00 UTC ECMWF initialization
+for consistent historical lead times, with a conservative 12-hour publication
+allowance. No submission is uploaded automatically.
+
+Useful options:
+
+```powershell
+python run_improved.py --date 2026-11-11 --offline
+python run_improved.py --date 2026-11-11 --cached-observations
+python run_improved.py --date 2026-11-11 --no-nwp --output output/improved/20261111_observations_only
+python -m unittest discover -s tests -v
+```
+
+`--offline` makes no data requests; the required caches must already exist.
+`--cached-observations` allows NWP downloads while retaining observation caches.
+`--no-nwp` supplies the observations-only comparison. `--team` overrides the
+configured filename suffix. See [model and validation details](docs/IMPROVED_FORECASTS.md).
+
+The original baseline workflow remains available:
+
 Use the project's Python environment, then:
 
 ```powershell
@@ -73,7 +109,13 @@ python diagnostics.py --input output/backtest_20261111.csv
 python forecast_fan.py --date 2026-11-11
 ```
 
-Diagnostics evaluate saved baseline rows. Fan plots read the saved forecasts
+Diagnostics compare all saved model rows on matching cases. For improved results:
+
+```powershell
+python diagnostics.py --input output/improved/20261111/backtest_predictions.csv --reference baseline --output output/improved/20261111/diagnostics
+```
+
+Fan plots read the saved forecasts
 and cached observations; add `--show` for an interactive window. Historical
 defaults remain November 4. Outputs go to `output/diagnostics/`; general
 diagnostic plots are overwritten by the next run, while fan evaluation tables
@@ -85,6 +127,8 @@ and figures include their forecast date.
 |---|---|
 | `config.py` | Shared forecast parameters and submission constants |
 | `run_pipeline.py`, `check_submission.*` | Submission workflow and format checks |
+| `run_improved.py` | Rolling calibration, fixed-run NWP backtesting and selected submission |
+| `ptsfc/nwp.py`, `ptsfc/calibration.py` | Forecast caches, station/regional predictors and postprocessing |
 | `ptsfc/models.py` | Baseline and candidate forecast functions |
 | `ptsfc/backtest.py`, `ptsfc/utils.py` | Evaluation, scores, dates and regression helpers |
 | `ptsfc/data_*.py`, `ptsfc/plots.py` | Data loading and standard plots |

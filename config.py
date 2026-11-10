@@ -5,7 +5,7 @@ Deliberately small: a simple starting point to improve week by week (see README,
 
 CFG = dict(
     # ----------------------------------------------------------- General --
-    team_name="MyTeam",          # -> output/20261104_MyTeam.csv
+    team_name="MonteCarloMafia",  # submission filename suffix
     forecast_date=None,          # None = next Wednesday (today if Wednesday); or "2026-11-04"
     offline=False,               # True = use only the cached data in data/
     dir_data="data",
