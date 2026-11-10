@@ -13,7 +13,14 @@ from config import QCOLS, QUANTILES, TARGETS  # noqa: E402
 plt.rcParams.update({"figure.dpi": 110, "font.size": 9, "axes.grid": True, "grid.alpha": 0.3})
 LAB = {"demand": "Load [GWh]", "res_demand": "Residual load [GWh]",
        "temperature": "2 m temperature [°C]", "wind": "10 m wind speed [m/s]"}
-COL = {"model": "tab:purple", "benchmark": "tab:red", "climatology": "tab:green"}
+COL = {"model": "tab:purple", "benchmark": "tab:red", "climatology": "tab:green",
+       "lagonly": "tab:brown", "lagreg": "tab:cyan"}   # v2: v1 models kept for comparison
+
+
+def _offsets(n, width=0.8):
+    """Bar positions/width for n models side by side."""
+    w = width / n
+    return [(k - (n - 1) / 2) * w for k in range(n)], w
 
 
 # ------------------------------------------------------------ Preprocessing --
@@ -79,8 +86,9 @@ def plots_calibration(B):
         for i, (c, nom) in enumerate([("in50", 0.5), ("in95", 0.95)]):
             ax = axs[i, j]
             cov = d.groupby(["model", "horizon"])[c].mean()
+            off, w = _offsets(len(models))
             for k, m in enumerate(models):
-                ax.bar(np.arange(len(hz)) + (k - 0.5) * 0.4, cov[m].reindex(hz), width=0.4, color=COL[m], label=m)
+                ax.bar(np.arange(len(hz)) + off[k], cov[m].reindex(hz), width=w, color=COL.get(m), label=m)
             ax.axhline(nom, ls="--", c="k"); ax.set_ylim(0, 1.05)
             ax.set_xticks(range(len(hz)), hz); ax.set_title(f"{tg} - {int(nom * 100)}% interval", fontsize=9)
         axs[0, j].legend(fontsize=7)
@@ -92,7 +100,7 @@ def plots_calibration(B):
     for ax, tg in zip(axs, TARGETS):
         ax.plot([0, 1], [0, 1], "k--", lw=0.8)
         for m, g in B[B.target == tg].groupby("model"):
-            ax.plot(QUANTILES, [np.mean(g.obs <= g[c]) for c in QCOLS], "o-", color=COL[m], label=m)
+            ax.plot(QUANTILES, [np.mean(g.obs <= g[c]) for c in QCOLS], "o-", color=COL.get(m), label=m)
         ax.set_title(tg); ax.set_xlabel("nominal level"); ax.legend(fontsize=7)
     axs[0].set_ylabel("share of obs <= quantile")
     fig.suptitle("Reliability diagram (on the diagonal = calibrated)")
@@ -102,8 +110,10 @@ def plots_calibration(B):
     fig, axs = plt.subplots(1, 4, figsize=(14, 3.8))
     for ax, tg in zip(axs, TARGETS):
         qs = B[B.target == tg].groupby(["model", "horizon"])["qs"].mean()
-        for k, m in enumerate(qs.index.get_level_values(0).unique()):
-            ax.bar(np.arange(len(hz)) + (k - 0.5) * 0.4, qs[m].reindex(hz), width=0.4, color=COL[m], label=m)
+        models = list(qs.index.get_level_values(0).unique())
+        off, w = _offsets(len(models))
+        for k, m in enumerate(models):
+            ax.bar(np.arange(len(hz)) + off[k], qs[m].reindex(hz), width=w, color=COL.get(m), label=m)
         ax.set_xticks(range(len(hz)), hz); ax.set_title(tg); ax.legend(fontsize=7)
     fig.suptitle("Mean quantile score by horizon (course metric, lower = better)")
     fig.tight_layout()
@@ -112,6 +122,7 @@ def plots_calibration(B):
     fig, axs = plt.subplots(4, 1, figsize=(12, 11))
     for ax, tg in zip(axs, TARGETS):
         d = B[(B.target == tg) & (B.model == "model") & (B.horizon == 36)].sort_values("origin")
+        d = d[d.origin.dt.dayofweek == 2]                   # Wednesdays only (weather may have daily origins)
         ax.vlines(d.origin, d["q0.025"], d["q0.975"], color="steelblue", alpha=0.4, lw=3)
         ax.vlines(d.origin, d["q0.25"], d["q0.75"], color="steelblue", lw=4)
         ax.scatter(d.origin, d.obs, s=10, c=np.where(d.in95, "k", "red"))
@@ -127,14 +138,31 @@ def plot_current_forecast(FC, fd):
     fig, axs = plt.subplots(2, 2, figsize=(12, 7))
     for ax, tg in zip(axs.flat, TARGETS):
         d = FC[FC.target == tg]
+        off, _ = _offsets(d.model.nunique(), width=0.6)
         for k, (m, g) in enumerate(d.groupby("model")):
-            x = np.arange(len(g)) + (k - 0.5) * 0.3
-            ax.vlines(x, g["q0.025"], g["q0.975"], color=COL[m], lw=1)
-            ax.vlines(x, g["q0.25"], g["q0.75"], color=COL[m], lw=5, label=m)
+            x = np.arange(len(g)) + off[k]
+            ax.vlines(x, g["q0.025"], g["q0.975"], color=COL.get(m), lw=1)
+            ax.vlines(x, g["q0.25"], g["q0.75"], color=COL.get(m), lw=5, label=m)
             ax.scatter(x, g["q0.5"], color="k", s=8, zorder=3)
         ax.set_xticks(range(6), [f"{h}h" for h in sorted(d.horizon.unique())])
         ax.set_title(LAB[tg]); ax.legend(fontsize=7)
     fig.suptitle(f"Forecast for {fd:%Y-%m-%d} (purple 'model' = submitted)")
+    fig.tight_layout()
+    return fig
+
+
+# ------------------------------------------------------------- Coefficients --
+def plot_coefficients(K, horizon=36):
+    """Impact (beta * sd of the regressor) of every term of the submitted model over the backtest origins."""
+    K = K[(K.model == "model") & (K.term != "intercept") & (K.horizon == horizon)]
+    fig, axs = plt.subplots(2, 2, figsize=(12, 7), sharex=True)
+    for ax, tg in zip(axs.flat, TARGETS):
+        for term, g in K[K.target == tg].groupby("term"):
+            g = g.sort_values("origin")
+            ax.plot(g.origin, g.impact, lw=1, label=term)
+        ax.axhline(0, c="k", lw=0.8)
+        ax.set_title(f"{LAB[tg]} - horizon {horizon} h"); ax.legend(fontsize=7)
+    fig.suptitle("Impact of each regressor = beta x std of the regressor (target units), re-estimated at each origin")
     fig.tight_layout()
     return fig
 

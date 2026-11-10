@@ -1,6 +1,7 @@
 """
-PTSFC 2026/27 - BASELINE PIPELINE
+PTSFC 2026/27 - PIPELINE (v2)
 Usage (from this directory):   python run_pipeline.py
+v2: ECMWF forecasts (Open-Meteo) for weather (MOS) and energy (regressors), paired comparisons.
 """
 import os
 import shutil
@@ -11,8 +12,9 @@ import pandas as pd
 
 from check_submission import check_df
 from config import CFG, QCOLS, TARGETS
-from ptsfc.backtest import run_backtest, summarise
+from ptsfc.backtest import compare, run_backtest, summarise
 from ptsfc.data_energy import load_energy_data
+from ptsfc.data_nwp import load_nwp
 from ptsfc.data_weather import load_weather_data
 from ptsfc.models import forecast_all
 from ptsfc.utils import msg, resolve_forecast_date
@@ -49,10 +51,17 @@ def main(cfg=CFG):
     # 1) Data
     ED = load_energy_data(cfg)
     W = load_weather_data(cfg)
+    NWP = load_nwp(cfg, fd)                                  # ECMWF forecasts; None entries -> fallback models
 
     # 2) Forecast + submission file + official check
-    FC = forecast_all(ED, W, cfg, fd)
+    coefs = []                                               # coefficient tables of every regression
+    FC = forecast_all(ED, W, cfg, fd, NWP, live=True, coefs=coefs)
     FC.to_csv(os.path.join(cfg["dir_output"], f"all_models_{fd:%Y%m%d}.csv"), index=False)
+    K = pd.DataFrame(coefs)
+    K.round(4).to_csv(os.path.join(cfg["dir_output"], f"coefficients_{fd:%Y%m%d}.csv"), index=False)
+    print("\n==== Submitted model: impact = beta * sd(x), per horizon (t-values in coefficients_*.csv) ====")
+    print(K[(K.model == "model") & (K.term != "intercept")]
+          .pivot_table(index=["target", "term"], columns="horizon", values="impact", sort=False).round(2).to_string())
     sub = build_submission(FC, fd)
     out_csv = os.path.join(cfg["dir_output"], f"{fd:%Y%m%d}_{cfg['team_name']}.csv")
     sub.to_csv(out_csv, index=False)
@@ -66,22 +75,36 @@ def main(cfg=CFG):
     # 3) Backtest + plots
     P = {}
     if cfg["run_backtest"]:
-        msg("Backtest over the last %d Wednesdays...", cfg["backtest_weeks"])
-        B = run_backtest(ED, W, cfg, fd)
+        msg("Backtest over the last %d weeks (weather origins: %s)...", cfg["backtest_weeks"],
+            "daily" if cfg["backtest_weather_daily"] else "Wednesdays")
+        coefs_bt = []
+        B = run_backtest(ED, W, cfg, fd, NWP, coefs_bt)
+        KB = pd.DataFrame(coefs_bt)
+        KB.round(4).to_csv(os.path.join(cfg["dir_output"], f"coefficients_backtest_{fd:%Y%m%d}.csv"), index=False)
         B.to_csv(os.path.join(cfg["dir_output"], f"backtest_{fd:%Y%m%d}.csv"), index=False)
         print("\n==== Backtest summary ====")
         print(summarise(B).to_string())
         summarise(B, ("target", "horizon", "model")).to_csv(
             os.path.join(cfg["dir_output"], f"backtest_scores_{fd:%Y%m%d}.csv"), index=False)
+        C = compare(B, cfg)
+        if C is not None:
+            print("\n==== Paired comparisons (gain > 0 favours the candidate) ====")
+            print(C.to_string())
+            C.to_csv(os.path.join(cfg["dir_output"], f"comparisons_{fd:%Y%m%d}.csv"), index=False)
     if cfg["make_plots"]:
         from ptsfc import plots
         P.update(plots.plots_preprocessing(ED, W))
         P["fc_01_current_forecast"] = plots.plot_current_forecast(FC, fd)
         if cfg["run_backtest"]:
             P.update(plots.plots_calibration(B))
+            P["coef_01_impact_over_time"] = plots.plot_coefficients(KB)
         plots.save_plots(P, os.path.join(cfg["dir_output"], f"plots_{fd:%Y%m%d}"),
                          os.path.join(cfg["dir_output"], f"plots_{fd:%Y%m%d}.pdf"))
         msg("Plots saved in %s", cfg["dir_output"])
+    used = set(FC.model)
+    msg("Energy: %s | Weather: %s",
+        "lags + weather forecast" if "lagonly" in used else "lags only (v1)",
+        "MOS on ECMWF" if "lagreg" in used else "lag regression (v1)")
     msg("Done. File to submit: %s", out_csv)
 
 
