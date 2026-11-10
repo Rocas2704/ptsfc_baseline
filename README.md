@@ -1,73 +1,105 @@
-# PTSFC 2026/27 – Baseline pipeline (simple starting point)
+# PTSFC 2026/27 forecasting workspace
 
-Deliberately simple models, designed to be improved one step at a time.
-The pipeline downloads the data, fits the models, writes the submission CSV,
-runs the course check (Python port + the original R script if `Rscript` exists),
-runs a 52-week backtest and saves a few plots.
+Start here for weekly submissions, saved-result diagnostics, and controlled
+weather experiments. See [the workspace review](docs/WORKSPACE_REVIEW.md) for
+what was fixed and the limitations of the historical experiment report.
 
-```bash
-pip install -r requirements.txt
-# set team_name in config.py, then:
+## Setup and weekly submission
+
+Use the project's Python environment, then:
+
+```powershell
+python -m pip install -r requirements.txt
+# Set team_name and optional forecast_date in config.py.
 python run_pipeline.py
 ```
 
-The `data/` cache from the previous version is compatible (same file names), so nothing is downloaded again.
+Run commands from the repository root. `config.py` controls data refresh,
+training windows, interval spreads, backtesting and plots. Set `offline=True`
+to reuse cached observations. The pipeline writes and checks the baseline
+submission, copies it to `archive/`, and optionally evaluates and plots the
+last 52 forecast Wednesdays.
 
-## The models
+Only rows labelled `model` go into the submission. Enhanced energy forecasts
+are evaluated alongside the baseline; experimental weather variants run
+separately. Neither is automatically promoted to the submission.
 
-**Energy (demand, res_demand)** – one multiple linear regression per target slot
-(Fri/Sat × hour ending 12/16/20 German time):
+## Weather experiment → audit → PDF
 
-    y(day, h) = b0 + b1 · y(last complete day, h) + b2 · y(same slot one week earlier) + e
+To reproduce the period used by the original report:
 
-Trained on the last `energy_train_weeks` observations of the same weekday and hour.
-Holidays and the Christmas/New Year period are removed from the training data (no holiday dummies).
-
-**Weather (temperature, wind)** – one regression with a lagged variable per horizon:
-
-    y(T) = b0 + b1 · y(last observed day, same clock hour) + e
-
-Trained only on days of the same season (± `weather_season_days` around the target's day of year,
-over `weather_train_years` years). The seasonal window replaces explicit seasonality terms.
-Wind quantiles are clipped at 0.
-
-**Uncertainty (all targets)** – point forecast + `spread` × empirical quantiles of the regression residuals.
-
-**References in the backtest**: the course benchmark for energy (last 20 same weekday/hour values)
-and the seasonal climatology for weather (same training window, no regression).
-
-## Files
-
-```
-config.py            all parameters
-run_pipeline.py      main script
-ptsfc/models.py      THE models (~100 lines) – this is the file to improve week by week
-ptsfc/backtest.py    re-runs the same forecast for the last N Wednesdays and scores it
-ptsfc/plots.py       preprocessing, calibration and current-forecast plots
-ptsfc/data_*.py      SMARD and DWD download + cache
-ptsfc/utils.py       dates, holidays, OLS + residual quantiles, quantile score
-check_submission.*   course check (Python port and original R)
+```powershell
+python experiment_weather.py --date 2026-11-04 --weeks 52
+python audit_weather.py
+python build_experiment_report.py --energy output/backtest_20261104.csv
 ```
 
-## How to improve week by week
+Experiments and audits use cached data by default; `experiment_weather.py
+--online` refreshes weather observations. Reproducing old scores exactly also
+requires the same observation cache and configuration. The report reads saved
+predictions and the training audit and rebuilds its summary tables, plots and
+paired comparisons. Its original research conclusions and energy numbers are
+explicitly labelled historical interpretation.
 
-1. Change **one thing** at a time.
-2. Run the pipeline and compare the backtest summary (`mean_QS`, `cov50`, `cov95`) with the previous version.
-3. Keep the change only if the mean quantile score drops (and calibration does not get worse).
-4. Write the change and the scores in a changelog (and commit it to git).
+For a fresh run, preserve earlier results by using a separate directory:
 
-## Roadmap – candidate improvements (rough order of expected gain / effort)
+```powershell
+python experiment_weather.py --date 2026-11-11 --output output/experiments/20261111/weather
+python audit_weather.py --input output/experiments/20261111/weather/predictions.csv --output output/experiments/20261111/audit
+python build_experiment_report.py --predictions output/experiments/20261111/weather/predictions.csv --audit-dir output/experiments/20261111/audit --energy output/backtest_20261111.csv
+```
 
-| # | Improvement | Target | Why | Effort |
-|---|---|---|---|---|
-| 1 | Tune `*_spread` from backtest coverage: `new = old · 1.96 / z`, with `z = Φ⁻¹((1 + cov95)/2)` | all | Intervals from in-sample residuals tend to be too narrow | trivial |
-| 2 | Use the ECMWF ensemble (Open-Meteo): raw quantiles first, then bias + spread correction, then blend with this baseline | temperature, wind | Lags carry little information 3 days ahead; the course benchmark is the ensemble | medium |
-| 3 | Add wind and solar forecasts as regressors | res_demand | The weather drives most of the residual load | medium |
-| 4 | Season-dependent residuals (e.g. only residuals from ± 45 days of year) | demand, res_demand | Errors are larger in winter (cold spells, wind) | small |
-| 5 | Annual seasonality terms (Fourier sin/cos of day of year) or a seasonal training window | demand, res_demand | Tuesday→Friday relation changes over the year | small |
-| 6 | Temperature as a regressor (heating demand) | demand | Explains winter peaks | medium |
-| 7 | Holiday dummies (only weekday holidays, minimum number of cases) instead of dropping days | demand, res_demand | Needed for holiday weeks after the Christmas break | small |
-| 8 | sqrt transform for wind (fit on sqrt scale, square the quantiles) | wind | Skewed, non-negative variable | small |
-| 9 | Quantile regression instead of OLS + residuals | all | Lets the interval width depend on the regressors | small |
-| 10 | Evaluate the archived submissions every week (scores vs. benchmark) | all | Real out-of-sample feedback, needed to tune the ensemble | small |
-| 11 | Combine several models (quantile averaging), weights from the backtest/archive | all | Combinations are usually more robust | medium |
+`--output` on the report changes the PDF path; generated CSVs and figures go
+to `--audit-dir`. All commands support `--help`. Generation writes `run.json`
+with configuration, variant mapping, date and generation time.
+
+| Model | Training sample | Predictors |
+|---|---|---|
+| W0 | Seasonal window | One daily lag (baseline) |
+| W1 | Seasonal window | Two daily lags |
+| W2a | Full historical window | Two daily lags |
+| W2b | Full historical window | Two daily lags + annual sine/cosine |
+| W2c | Full historical window | One daily lag + annual sine/cosine |
+
+All use OLS plus empirical residual quantiles. Weather wind quantiles are
+clipped at zero. Compare matched observations and weekly mean quantile scores
+(lower is better), alongside 50% and 95% coverage. Bootstrap intervals are
+exploratory because configurations were inspected on the same evaluation year.
+
+## Inspect saved forecasts
+
+```powershell
+python diagnostics.py --input output/backtest_20261111.csv
+python forecast_fan.py --date 2026-11-11
+```
+
+Diagnostics evaluate saved baseline rows. Fan plots read the saved forecasts
+and cached observations; add `--show` for an interactive window. Historical
+defaults remain November 4. Outputs go to `output/diagnostics/`; general
+diagnostic plots are overwritten by the next run, while fan evaluation tables
+and figures include their forecast date.
+
+## Where things belong
+
+| Location | Purpose |
+|---|---|
+| `config.py` | Shared forecast parameters and submission constants |
+| `run_pipeline.py`, `check_submission.*` | Submission workflow and format checks |
+| `ptsfc/models.py` | Baseline and candidate forecast functions |
+| `ptsfc/backtest.py`, `ptsfc/utils.py` | Evaluation, scores, dates and regression helpers |
+| `ptsfc/data_*.py`, `ptsfc/plots.py` | Data loading and standard plots |
+| `experiment_weather.py`, `audit_weather.py`, `build_experiment_report.py` | Research workflow |
+| `diagnostics.py`, `forecast_fan.py` | Saved-result analysis |
+| `data/` | Local SMARD/DWD observation caches |
+| `output/` | Generated submissions, backtests, plots, experiments and reports |
+| `archive/` | Submission history; retain deliberately |
+| `docs/` | Review notes and methodological limitations |
+
+New caches, outputs, bytecode, IDE state and the virtual environment are
+ignored by Git. Existing tracked artifacts remain tracked. Archive submissions
+remain visible so they can be committed deliberately. No old results need
+to be deleted to use this structure.
+
+For each future change, record the hypothesis, configuration, Git revision,
+data acquisition time, matched scores and coverage. Change one element at a
+time and validate on fresh forecast weeks before adopting it.

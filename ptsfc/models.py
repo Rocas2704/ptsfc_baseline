@@ -26,6 +26,98 @@ DAY, H = pd.Timedelta(days=1), pd.Timedelta(hours=1)
 ENERGY_SLOTS = {36: (2, 12), 40: (2, 16), 44: (2, 20), 60: (3, 12), 64: (3, 16), 68: (3, 20)}
 
 
+
+# =================================================================== ENERGY Enhanced==
+
+def forecast_energy_enhanced(ED, col, fd, horizon, cfg):
+    """Enhanced OLS with additional weekly lags and annual seasonality."""
+
+    day_offset, hour = ENERGY_SLOTS[horizon]
+    V = ED.wide[col][hour]
+
+    td = fd + day_offset * DAY
+    lcd = ED.last_complete_day(col, fd - DAY)
+
+    ref_lag = (td - lcd).days
+
+    # Use 104 weeks of historical data, as in the baseline
+    dates = pd.date_range(
+        end=lcd,
+        periods=7 * (cfg["energy_train_weeks"] + 4),
+        freq="D"
+    )
+    dates = dates[
+        wday_u(dates) == wday_u(td)
+    ][-cfg["energy_train_weeks"]:]
+
+    if cfg["drop_holidays_from_training"]:
+        bad = (
+            is_special_day(dates)
+            | is_special_day(dates - ref_lag * DAY)
+            | is_special_day(dates - 7 * DAY)
+            | is_special_day(dates - 14 * DAY)
+            | is_special_day(dates - 21 * DAY)
+        )
+        dates = dates[~bad]
+
+    # Additional autoregressive lags
+    X = np.column_stack([
+        V.reindex(dates - ref_lag * DAY),
+        V.reindex(dates - 7 * DAY),
+        V.reindex(dates - 14 * DAY),
+        V.reindex(dates - 21 * DAY),
+    ])
+
+    # Fourier terms for annual seasonality
+    doy = dates.dayofyear.to_numpy()
+    seasonal = np.column_stack([
+        np.sin(2 * np.pi * doy / 365.25),
+        np.cos(2 * np.pi * doy / 365.25),
+    ])
+
+    X = np.column_stack([X, seasonal])
+    y = V.reindex(dates).to_numpy()
+
+    ok = ~np.isnan(y) & ~np.isnan(X).any(axis=1)
+
+    # Forecast features (only past observations)
+    target_doy = td.dayofyear
+
+    x_new = np.array([
+        V.get(td - ref_lag * DAY, np.nan),
+        V.get(td - 7 * DAY, np.nan),
+        V.get(td - 14 * DAY, np.nan),
+        V.get(td - 21 * DAY, np.nan),
+        np.sin(2 * np.pi * target_doy / 365.25),
+        np.cos(2 * np.pi * target_doy / 365.25),
+    ])
+
+    # Missing historical predictors: use baseline fallback
+    if np.isnan(x_new).any() or ok.sum() < 20:
+        baseline = forecast_energy(ED, col, fd, horizon, cfg)[0]
+        baseline["model"] = "enhanced"
+        return baseline
+
+    from .utils import ols_quantiles
+
+    q, _ = ols_quantiles(
+        X[ok], y[ok], x_new,
+        spread=cfg["energy_spread"][col]
+    )
+
+    meta = dict(
+        target=col,
+        horizon=horizon,
+        target_time=f"{td:%Y-%m-%d} {hour:02d}:00",
+        obs=V.get(td, np.nan)
+    )
+
+    return dict(meta, model="enhanced", **dict(zip(QCOLS, q)))
+
+
+
+
+
 # =================================================================== ENERGY ==
 def forecast_energy(ED, col, fd, horizon, cfg):
     day_offset, hour = ENERGY_SLOTS[horizon]
@@ -93,12 +185,165 @@ def forecast_weather(W, var, fd, horizon, cfg):
             dict(meta, model="climatology", **dict(zip(QCOLS, clim)))]
 
 
+
+# ================================================================== WEATHER Enhanced ==
+
+
+def forecast_weather_enhanced(
+    W, var, fd, horizon, cfg, variant="lag2"
+):
+    """
+    Two experimental weather models.
+
+    lag2:
+        Two available daily lags, seasonal training window.
+
+    fourier:
+        Two available daily lags, full historical window,
+        annual sine and cosine regressors.
+
+    Both use OLS and empirical residual quantiles.
+    """
+
+    s = W[var]
+
+    # Last observation available at the historical forecast origin.
+    t0 = s.loc[
+        :fd.tz_localize("UTC") - H
+    ].last_valid_index()
+
+    # Target time: same definition as the original model.
+    T = (
+        (fd + DAY).tz_localize("UTC")
+        + horizon * H
+    )
+
+    # First and second available same-hour observations.
+    k0 = int(np.ceil((T - t0) / H / 24))
+
+    lag1 = k0 * 24 * H
+    lag2 = (k0 + 1) * 24 * H
+
+    # Historical training target times.
+    # Never include an observation after t0.
+    n_days = int(365.25 * cfg["weather_train_years"])
+
+    Td = T - pd.to_timedelta(
+        np.arange(k0, n_days) * 24,
+        unit="h"
+    )
+
+    if variant == "lag2":
+        dist = np.abs(Td.dayofyear - T.dayofyear)
+
+        Td = Td[
+            np.minimum(dist, 365 - dist)
+            <= cfg["weather_season_days"]
+            ]
+
+    elif variant not in ("fourier", "full_lag2", "fourier_lag1"):
+        raise ValueError(f"Unknown weather variant: {variant}")
+
+    # Training observations and predictors.
+    y = s.reindex(Td).to_numpy(dtype=float)
+
+    x1 = s.reindex(Td - lag1).to_numpy(dtype=float)
+    x2 = s.reindex(Td - lag2).to_numpy(dtype=float)
+
+    if variant == "fourier_lag1":
+        X = x1[:, None]
+        x_new = np.array([
+            s.get(T - lag1, np.nan)
+        ], dtype=float)
+
+    else:
+        X = np.column_stack([x1, x2])
+        x_new = np.array([
+            s.get(T - lag1, np.nan),
+            s.get(T - lag2, np.nan)
+        ], dtype=float)
+
+    if variant in ("fourier", "fourier_lag1"):
+
+        # Explicit annual seasonality.
+        doy = Td.dayofyear.to_numpy()
+
+        seasonal = np.column_stack([
+            np.sin(2 * np.pi * doy / 365.25),
+            np.cos(2 * np.pi * doy / 365.25)
+        ])
+
+        X = np.column_stack([X, seasonal])
+
+        target_doy = T.dayofyear
+
+        x_new = np.concatenate([
+            x_new,
+            [
+                np.sin(
+                    2 * np.pi * target_doy / 365.25
+                ),
+                np.cos(
+                    2 * np.pi * target_doy / 365.25
+                )
+            ]
+        ])
+
+    # Remove missing training observations.
+    ok = np.isfinite(y) & np.isfinite(X).all(axis=1)
+
+    # Fall back to original model if data are insufficient.
+    if not np.isfinite(x_new).all() or ok.sum() < 30:
+
+        baseline = forecast_weather(
+            W, var, fd, horizon, cfg
+        )[0].copy()
+
+        baseline["model"] = f"weather_{variant}"
+        return baseline
+
+    # Same estimation and uncertainty method as the baseline.
+    q, _ = ols_quantiles(
+        X[ok],
+        y[ok],
+        x_new,
+        spread=cfg["weather_spread"][var]
+    )
+
+    if var == "wind":
+        q = np.clip(q, 0, None)
+
+    meta = dict(
+        target=var,
+        horizon=horizon,
+        target_time=f"{T:%Y-%m-%d %H:%M} UTC",
+        obs=s.get(T, np.nan)
+    )
+
+    return dict(
+        meta,
+        model=f"weather_{variant}",
+        **dict(zip(QCOLS, q))
+    )
+
+
+
+
+
+
 # ===================================================================== ALL ==
+
 def forecast_all(ED, W, cfg, fd):
     rows = []
+
     for h in HORIZONS:
         for col in ("demand", "res_demand"):
             rows += forecast_energy(ED, col, fd, h, cfg)
+            rows.append(
+                forecast_energy_enhanced(ED, col, fd, h, cfg)
+            )
+
         for var in ("temperature", "wind"):
             rows += forecast_weather(W, var, fd, h, cfg)
+
     return pd.DataFrame(rows)

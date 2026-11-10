@@ -13,7 +13,7 @@ from config import QCOLS, QUANTILES, TARGETS  # noqa: E402
 plt.rcParams.update({"figure.dpi": 110, "font.size": 9, "axes.grid": True, "grid.alpha": 0.3})
 LAB = {"demand": "Load [GWh]", "res_demand": "Residual load [GWh]",
        "temperature": "2 m temperature [°C]", "wind": "10 m wind speed [m/s]"}
-COL = {"model": "tab:purple", "benchmark": "tab:red", "climatology": "tab:green"}
+COL = {"model": "tab:purple", "benchmark": "tab:red", "climatology": "tab:green", "enhanced": "darkorange",}
 
 
 # ------------------------------------------------------------ Preprocessing --
