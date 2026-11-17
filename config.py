@@ -9,8 +9,8 @@ CFG = dict(
     forecast_date=None,          # None = next Wednesday (today if Wednesday); or "2026-11-04"
     offline=False,               # True = use only the cached data in data/
     dir_data="data",
-    dir_output="output",
-    dir_archive="archive",       # every submission is copied here
+    dir_output="week2/output",
+    dir_archive="week2/archive",       # every submission is copied here
     r_check_script="check_submission.R",  # also run the R check if Rscript is installed
     make_plots=True,
     run_backtest=True,

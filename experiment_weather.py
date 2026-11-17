@@ -21,7 +21,7 @@ def main(argv=None):
     parser.add_argument('--date', help='Forecast Wednesday ending the backtest, e.g. 2026-11-04')
     parser.add_argument('--weeks', type=int, default=CFG['backtest_weeks'])
     parser.add_argument('--online', action='store_true', help='Refresh DWD data instead of using cache only')
-    parser.add_argument('--output', type=Path, default=ROOT / 'output/weather_experiment')
+    parser.add_argument('--output', type=Path, default=ROOT / 'week2/output/weather_experiment')
     args = parser.parse_args(argv)
     if args.weeks < 1:
         parser.error('--weeks must be positive')

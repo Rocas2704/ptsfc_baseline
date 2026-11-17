@@ -31,10 +31,10 @@ def main(argv=None):
     DAY = pd.Timedelta(days=1)
     HOUR = pd.Timedelta(hours=1)
 
-    os.makedirs("output/diagnostics", exist_ok=True)
+    os.makedirs("week1/output/diagnostics", exist_ok=True)
 
     # Use the SAVED Week 1 forecasts, not today's model code.
-    forecast_file = f"output/all_models_{fd:%Y%m%d}.csv"
+    forecast_file = f"week1/output/all_models_{fd:%Y%m%d}.csv"
 
     FC = pd.read_csv(forecast_file)
     FC = FC[FC["model"] == "model"].copy()
@@ -277,7 +277,7 @@ def main(argv=None):
 
     plt.tight_layout(rect=[0, 0.11, 1, 0.95])
 
-    path = f"output/diagnostics/forecast_evaluation_{fd:%Y%m%d}.png"
+    path = f"week1/output/diagnostics/forecast_evaluation_{fd:%Y%m%d}.png"
     plt.savefig(path, dpi=200, bbox_inches="tight")
 
     # --------------------------------------------------
@@ -297,7 +297,7 @@ def main(argv=None):
         )
 
         results.to_csv(
-            f"output/diagnostics/forecast_evaluation_{fd:%Y%m%d}.csv",
+            f"week1/output/diagnostics/forecast_evaluation_{fd:%Y%m%d}.csv",
             index=False
         )
     else:

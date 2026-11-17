@@ -14,8 +14,8 @@ from ptsfc.data_weather import load_weather_data
 from ptsfc.utils import mean_qs
 
 ROOT = Path(__file__).resolve().parent
-INPUT = ROOT / 'output/weather_experiment/predictions.csv'
-OUT = ROOT / 'output/weather_audit'
+INPUT = ROOT / 'week2/output/weather_experiment/predictions.csv'
+OUT = ROOT / 'week2/output/weather_audit'
 MODELS = ['W0', 'W1', 'W2a', 'W2b', 'W2c']
 TARGETS = ['temperature', 'wind']
 HORIZONS = [36, 40, 44, 60, 64, 68]

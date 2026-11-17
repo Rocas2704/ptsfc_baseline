@@ -173,8 +173,8 @@ def plot_current(current, selected, output_dir):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--input', type=Path, default=ROOT / 'output/backtest_20261111.csv')
-    parser.add_argument('--output', type=Path, default=ROOT / 'output/diagnostics')
+    parser.add_argument('--input', type=Path, default=ROOT / 'week2/output/backtest_20261111.csv')
+    parser.add_argument('--output', type=Path, default=ROOT / 'week2/output/diagnostics')
     parser.add_argument('--reference', default='model')
     parser.add_argument('--comparison-run', type=Path, help='Generate original-style baseline/selected plots from an improved run directory')
     args = parser.parse_args(argv)
