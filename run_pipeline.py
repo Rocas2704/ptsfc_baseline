@@ -1,7 +1,8 @@
 """
-PTSFC 2026/27 - PIPELINE (v2)
+PTSFC 2026/27 - PIPELINE (v3)
 Usage (from this directory):   python run_pipeline.py
 v2: ECMWF forecasts (Open-Meteo) for weather (MOS) and energy (regressors), paired comparisons.
+v3: multi-model ensemble (EMOS) for temperature and wind (ptsfc/ensemble.py).
 """
 import os
 import shutil
@@ -42,6 +43,24 @@ def run_r_check(cfg, path):
             raise SystemExit("The file did NOT pass the R check.")
 
 
+def ensemble_weights(K):
+    """Mean combination weight of every weather centre (lead days k and k+1 summed), per target."""
+    if K.empty or "term" not in K:
+        return None
+    w = K[(K.model == "model") & K.term.astype(str).str.startswith("w_")]
+    if w.empty:
+        return None
+    w = w.assign(source=w.term.str[2:].str.split("|").str[0])
+    return (w.groupby(["target", "origin", "horizon", "source"]).beta.sum()
+             .groupby(["target", "source"]).mean().unstack(0).round(3))
+
+
+def weather_used(FC):
+    """Which weather model was submitted for each variable (column "method" of the submitted rows)."""
+    M = FC[(FC.model == "model") & FC.target.isin(["temperature", "wind"])]
+    return {v: "/".join(sorted(set(g["method"].dropna()))) for v, g in M.groupby("target")} if "method" in M else {}
+
+
 def main(cfg=CFG):
     for d in (cfg["dir_data"], cfg["dir_output"], cfg["dir_archive"]):
         os.makedirs(d, exist_ok=True)
@@ -51,7 +70,7 @@ def main(cfg=CFG):
     # 1) Data
     ED = load_energy_data(cfg)
     W = load_weather_data(cfg)
-    NWP = load_nwp(cfg, fd)                                  # ECMWF forecasts; None entries -> fallback models
+    NWP = load_nwp(cfg, fd)                                  # ECMWF (+ ensemble) forecasts; None -> fallback models
 
     # 2) Forecast + submission file + official check
     coefs = []                                               # coefficient tables of every regression
@@ -62,6 +81,10 @@ def main(cfg=CFG):
     print("\n==== Submitted model: impact = beta * sd(x), per horizon (t-values in coefficients_*.csv) ====")
     print(K[(K.model == "model") & (K.term != "intercept")]
           .pivot_table(index=["target", "term"], columns="horizon", values="impact", sort=False).round(2).to_string())
+    Wt = ensemble_weights(K)
+    if Wt is not None:
+        print("\n==== Ensemble: weight of each weather centre in this forecast (mean over horizons) ====")
+        print(Wt.to_string())
     sub = build_submission(FC, fd)
     out_csv = os.path.join(cfg["dir_output"], f"{fd:%Y%m%d}_{cfg['team_name']}.csv")
     sub.to_csv(out_csv, index=False)
@@ -86,11 +109,19 @@ def main(cfg=CFG):
         print(summarise(B).to_string())
         summarise(B, ("target", "horizon", "model")).to_csv(
             os.path.join(cfg["dir_output"], f"backtest_scores_{fd:%Y%m%d}.csv"), index=False)
+        if "method" in B:
+            M = B[(B.model == "model") & B.target.isin(["temperature", "wind"])]
+            print("\n==== Weather: share of backtest cases per submitted model (fallbacks) ====")
+            print(M.groupby("target")["method"].value_counts(normalize=True).round(3).unstack(fill_value=0).to_string())
         C = compare(B, cfg)
         if C is not None:
             print("\n==== Paired comparisons (gain > 0 favours the candidate) ====")
             print(C.to_string())
             C.to_csv(os.path.join(cfg["dir_output"], f"comparisons_{fd:%Y%m%d}.csv"), index=False)
+        Wt = ensemble_weights(KB)
+        if Wt is not None:
+            print("\n==== Ensemble: mean weight of each weather centre over the backtest ====")
+            print(Wt.to_string())
     if cfg["make_plots"]:
         from ptsfc import plots
         P.update(plots.plots_preprocessing(ED, W))
@@ -102,9 +133,9 @@ def main(cfg=CFG):
                          os.path.join(cfg["dir_output"], f"plots_{fd:%Y%m%d}.pdf"))
         msg("Plots saved in %s", cfg["dir_output"])
     used = set(FC.model)
-    msg("Energy: %s | Weather: %s",
+    msg("Energy: %s | Weather submitted: %s",
         "lags + weather forecast" if "lagonly" in used else "lags only (v1)",
-        "MOS on ECMWF" if "lagreg" in used else "lag regression (v1)")
+        ", ".join(f"{v} = {m}" for v, m in weather_used(FC).items()))
     msg("Done. File to submit: %s", out_csv)
 
 
