@@ -115,6 +115,19 @@ Diagnostics compare all saved model rows on matching cases. For improved results
 python diagnostics.py --input output/improved/20261111/backtest_predictions.csv --reference baseline --output output/improved/20261111/diagnostics
 ```
 
+For the same layouts as the original `plots_20261111` (coverage, reliability,
+scores by horizon, interval backtests, current forecasts and preprocessing):
+
+```powershell
+python diagnostics.py --comparison-run output/improved/20261111
+```
+
+These are also generated automatically by `run_improved.py`. Open
+`output/improved/20261111/plots_20261111.pdf` for the combined report, or
+`output/improved/20261111/plots_20261111/` for individual PNGs. Blue is the
+baseline; purple is the selected forecast. The side-by-side horizon-36 plot
+shares dates and scales. Both models use the same historical cases per target.
+
 Fan plots read the saved forecasts
 and cached observations; add `--show` for an interactive window. Historical
 defaults remain November 4. Outputs go to `output/diagnostics/`; general

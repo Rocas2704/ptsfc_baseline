@@ -176,8 +176,105 @@ def main(argv=None):
     parser.add_argument('--input', type=Path, default=ROOT / 'output/backtest_20261111.csv')
     parser.add_argument('--output', type=Path, default=ROOT / 'output/diagnostics')
     parser.add_argument('--reference', default='model')
+    parser.add_argument('--comparison-run', type=Path, help='Generate original-style baseline/selected plots from an improved run directory')
     args = parser.parse_args(argv)
-    create_diagnostics(pd.read_csv(args.input), args.output, args.reference)
+    if args.comparison_run:
+        create_comparison_plots(args.comparison_run)
+    else:
+        create_diagnostics(pd.read_csv(args.input), args.output, args.reference)
+
+
+def create_comparison_plots(run_dir):
+    """Reuse ptsfc.plots layouts with baseline and final selected model choices."""
+    import json
+    from ptsfc import plots
+    from ptsfc.data_energy import load_energy_data
+    from ptsfc.data_weather import load_weather_data
+    run_dir = Path(run_dir)
+    metadata = json.loads((run_dir / 'run.json').read_text(encoding='utf-8'))
+    fd = pd.Timestamp(metadata['forecast_date'])
+    backtest = prepare(pd.read_csv(run_dir / 'backtest_predictions.csv'))
+    current = pd.read_csv(run_dir / 'current_predictions.csv')
+    selected = pd.read_csv(run_dir / 'selected_predictions.csv')
+    chosen, parts, live = {}, [], []
+    for target in TARGETS:
+        source = selected.loc[selected.target.eq(target), 'source_model'].unique()
+        if len(source) != 1:
+            raise ValueError(f'Expected one selected model for {target}')
+        chosen[target] = source[0]
+        candidate = backtest.loc[backtest.target.eq(target) & backtest.model.eq(source[0])].copy()
+        baseline = backtest.loc[backtest.target.eq(target) & backtest.model.eq('baseline')].copy()
+        common = candidate[KEYS].merge(baseline[KEYS], on=KEYS, validate='one_to_one')
+        if common.empty:
+            raise ValueError(f'No paired historical cases for {target}')
+        candidate = candidate.merge(common, on=KEYS, validate='one_to_one')
+        baseline = baseline.merge(common, on=KEYS, validate='one_to_one')
+        candidate['source_model'], baseline['source_model'] = source[0], 'baseline'
+        candidate['model'], baseline['model'] = 'selected', 'baseline'
+        parts.extend([baseline, candidate])
+        original = current.loc[current.target.eq(target) & current.model.eq('baseline')].copy()
+        original['model'] = 'baseline'
+        final = selected.loc[selected.target.eq(target)].copy()
+        final['model'] = 'selected'
+        live.extend([original, final])
+    comparison = prepare(pd.concat(parts, ignore_index=True))
+    live = pd.concat(live, ignore_index=True)
+    directory = run_dir / f'plots_{fd:%Y%m%d}'
+    directory.mkdir(exist_ok=True)
+    comparison.to_csv(directory / 'comparison_backtest.csv', index=False)
+    live.to_csv(directory / 'comparison_current.csv', index=False)
+    summary(comparison, ['target', 'model']).to_csv(directory / 'comparison_scores.csv', index=False)
+    cfg = dict(metadata['configuration'], offline=True)
+    energy, weather = load_energy_data(cfg), load_weather_data(cfg)
+    figures = plots.plots_preprocessing(energy, weather)
+    figures.update(plots.plots_calibration(comparison, interval_model='selected'))
+    # Separate baseline panel uses identical dates, observations and y scales.
+    baseline_fig = plots.plots_calibration(comparison, interval_model='baseline')
+    for name, figure in baseline_fig.items():
+        if name == 'cal_04_backtest_36h':
+            figures['cal_04_backtest_36h_baseline'] = figure
+        else:
+            plt.close(figure)
+    selected_fig = figures['cal_04_backtest_36h']
+    selected_fig.suptitle('Selected forecast: intervals vs. observations (red = outside 95%)')
+    figures['cal_04_backtest_36h_baseline'].suptitle('Baseline: intervals vs. observations (red = outside 95%)')
+    for left, right in zip(selected_fig.axes, figures['cal_04_backtest_36h_baseline'].axes):
+        low, high = min(left.get_ylim()[0], right.get_ylim()[0]), max(left.get_ylim()[1], right.get_ylim()[1])
+        left.set_ylim(low, high)
+        right.set_ylim(low, high)
+    figures['fc_01_current_forecast'] = plots.plot_current_forecast(live, fd, submitted_model='selected')
+    # One additional page makes interval differences visible without switching pages.
+    fig, axes = plt.subplots(4, 2, figsize=(14, 11), sharex=True, sharey='row')
+    for row, target in enumerate(TARGETS):
+        for col, model in enumerate(['baseline', 'selected']):
+            ax = axes[row, col]
+            group = comparison.loc[comparison.target.eq(target) & comparison.model.eq(model)
+                                   & comparison.horizon.eq(36)].sort_values('origin')
+            ax.vlines(group.origin, group['q0.025'], group['q0.975'], color=plots.COL[model], alpha=.35, lw=3)
+            ax.vlines(group.origin, group['q0.25'], group['q0.75'], color=plots.COL[model], lw=4)
+            ax.scatter(group.origin, group.obs, s=10, c=np.where(group.in95, 'black', 'red'), zorder=3)
+            ax.set_title(f'{target}: {model} ({chosen[target] if model == "selected" else "original"})', fontsize=9)
+            if col == 0:
+                ax.set_ylabel(plots.LAB[target])
+    fig.suptitle('Horizon 36h: baseline vs. selected on identical cases (shared scales)')
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    figures['cal_05_backtest_36h_comparison'] = fig
+    pdf = run_dir / f'plots_{fd:%Y%m%d}.pdf'
+    plots.save_plots(figures, str(directory), str(pdf))
+    (directory / 'README.md').write_text(
+        '# Original-style forecast comparisons\n\n'
+        'Blue = original baseline; purple = selected submission model. Energy selections remain baseline.\n\n'
+        'Calibration and scores use identical cases within each target; missing NWP cases are excluded from both models. '
+        'Counts and plotted values are in comparison_backtest.csv and comparison_scores.csv.\n\n'
+        'Historical selected rows use the final model choices retrospectively. This is a model comparison, '
+        'not a backtest of a model-selection rule known before the evaluation year. '
+        'The figures cover the full available evaluation sample; 45.2%/31.0% figures refer only to the final 13 weeks.\n\n'
+        'Preprocessing plots use the current local observation caches. Comparison forecasts and outcomes come from '
+        'the saved improved run, so the baseline can differ slightly from older saved plots after data revisions.\n',
+        encoding='utf-8')
+    print(f'Original-style comparison plots: {directory}\nCombined PDF: {pdf}', flush=True)
+    return pdf
 
 
 if __name__ == '__main__':

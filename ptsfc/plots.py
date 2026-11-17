@@ -13,7 +13,8 @@ from config import QCOLS, QUANTILES, TARGETS  # noqa: E402
 plt.rcParams.update({"figure.dpi": 110, "font.size": 9, "axes.grid": True, "grid.alpha": 0.3})
 LAB = {"demand": "Load [GWh]", "res_demand": "Residual load [GWh]",
        "temperature": "2 m temperature [°C]", "wind": "10 m wind speed [m/s]"}
-COL = {"model": "tab:purple", "benchmark": "tab:red", "climatology": "tab:green", "enhanced": "darkorange",}
+COL = {"model": "tab:purple", "benchmark": "tab:red", "climatology": "tab:green", "enhanced": "darkorange",
+       "baseline": "tab:blue", "selected": "tab:purple"}
 
 
 # ------------------------------------------------------------ Preprocessing --
@@ -68,7 +69,7 @@ def plots_preprocessing(ED, W):
 
 
 # --------------------------------------------------------------- Calibration --
-def plots_calibration(B):
+def plots_calibration(B, interval_model="model"):
     P = {}
     hz = sorted(B.horizon.unique())
 
@@ -76,11 +77,13 @@ def plots_calibration(B):
     for j, tg in enumerate(TARGETS):
         d = B[B.target == tg]
         models = list(d.model.unique())
+        width = 0.8 / max(len(models), 1)
         for i, (c, nom) in enumerate([("in50", 0.5), ("in95", 0.95)]):
             ax = axs[i, j]
             cov = d.groupby(["model", "horizon"])[c].mean()
             for k, m in enumerate(models):
-                ax.bar(np.arange(len(hz)) + (k - 0.5) * 0.4, cov[m].reindex(hz), width=0.4, color=COL[m], label=m)
+                ax.bar(np.arange(len(hz)) + (k - (len(models) - 1) / 2) * width,
+                       cov[m].reindex(hz), width=width, color=COL[m], label=m)
             ax.axhline(nom, ls="--", c="k"); ax.set_ylim(0, 1.05)
             ax.set_xticks(range(len(hz)), hz); ax.set_title(f"{tg} - {int(nom * 100)}% interval", fontsize=9)
         axs[0, j].legend(fontsize=7)
@@ -102,8 +105,11 @@ def plots_calibration(B):
     fig, axs = plt.subplots(1, 4, figsize=(14, 3.8))
     for ax, tg in zip(axs, TARGETS):
         qs = B[B.target == tg].groupby(["model", "horizon"])["qs"].mean()
-        for k, m in enumerate(qs.index.get_level_values(0).unique()):
-            ax.bar(np.arange(len(hz)) + (k - 0.5) * 0.4, qs[m].reindex(hz), width=0.4, color=COL[m], label=m)
+        models = qs.index.get_level_values(0).unique()
+        width = 0.8 / max(len(models), 1)
+        for k, m in enumerate(models):
+            ax.bar(np.arange(len(hz)) + (k - (len(models) - 1) / 2) * width,
+                   qs[m].reindex(hz), width=width, color=COL[m], label=m)
         ax.set_xticks(range(len(hz)), hz); ax.set_title(tg); ax.legend(fontsize=7)
     fig.suptitle("Mean quantile score by horizon (course metric, lower = better)")
     fig.tight_layout()
@@ -111,7 +117,7 @@ def plots_calibration(B):
 
     fig, axs = plt.subplots(4, 1, figsize=(12, 11))
     for ax, tg in zip(axs, TARGETS):
-        d = B[(B.target == tg) & (B.model == "model") & (B.horizon == 36)].sort_values("origin")
+        d = B[(B.target == tg) & (B.model == interval_model) & (B.horizon == 36)].sort_values("origin")
         ax.vlines(d.origin, d["q0.025"], d["q0.975"], color="steelblue", alpha=0.4, lw=3)
         ax.vlines(d.origin, d["q0.25"], d["q0.75"], color="steelblue", lw=4)
         ax.scatter(d.origin, d.obs, s=10, c=np.where(d.in95, "k", "red"))
@@ -123,18 +129,21 @@ def plots_calibration(B):
 
 
 # ---------------------------------------------------------- Current forecast --
-def plot_current_forecast(FC, fd):
+def plot_current_forecast(FC, fd, submitted_model="model"):
     fig, axs = plt.subplots(2, 2, figsize=(12, 7))
     for ax, tg in zip(axs.flat, TARGETS):
         d = FC[FC.target == tg]
-        for k, (m, g) in enumerate(d.groupby("model")):
-            x = np.arange(len(g)) + (k - 0.5) * 0.3
+        models = list(d.groupby("model"))
+        width = 0.6 / max(len(models), 1)
+        for k, (m, g) in enumerate(models):
+            g = g.sort_values("horizon")
+            x = np.arange(len(g)) + (k - (len(models) - 1) / 2) * width
             ax.vlines(x, g["q0.025"], g["q0.975"], color=COL[m], lw=1)
             ax.vlines(x, g["q0.25"], g["q0.75"], color=COL[m], lw=5, label=m)
             ax.scatter(x, g["q0.5"], color="k", s=8, zorder=3)
         ax.set_xticks(range(6), [f"{h}h" for h in sorted(d.horizon.unique())])
         ax.set_title(LAB[tg]); ax.legend(fontsize=7)
-    fig.suptitle(f"Forecast for {fd:%Y-%m-%d} (purple 'model' = submitted)")
+    fig.suptitle(f"Forecast for {fd:%Y-%m-%d} (purple '{submitted_model}' = submitted)")
     fig.tight_layout()
     return fig
 
