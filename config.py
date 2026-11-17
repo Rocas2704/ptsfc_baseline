@@ -1,5 +1,5 @@
 """
-PTSFC 2026/27 - CONFIGURATION (v2 + enhanced weather model)
+PTSFC 2026/27 - CONFIGURATION (v3: multi-model ensemble for the weather targets)
 """
 
 CFG = dict(
@@ -56,33 +56,62 @@ CFG = dict(
     weather_season_days=30,      # only training days within +/- N days of the target's day of year
     weather_spread=dict(temperature=1.0, wind=1.0),
 
-    # Submitted weather model: "enhanced" | "mos" | "lagreg"  (fallback: enhanced -> mos -> lagreg)
-    weather_method="enhanced",
+    # Submitted weather model: "ensemble" | "enhanced" | "mos" | "lagreg"
+    # fallbacks: ensemble -> mos -> enhanced -> lagreg (the first one that can be fitted is submitted)
+    weather_method="ensemble",
     weather_enhanced_variant="lag2",   # lag2 | full_lag2 | fourier | fourier_lag1, or a dict per variable
-    # MOS (still computed for comparison)
+    # MOS (single model = ECMWF, still computed for comparison)
     wind_sqrt=True,
     mos_window_days=60,          # last N days ...
     mos_season_days=30,          # ... + same season (+/- N days) in earlier years
     mos_min_rows=60,
+
+    # ------------------------------------- v3: multi-model ensemble (EMOS) --
+    # Members = deterministic runs of independent weather centres (Open-Meteo Previous Runs API).
+    # Model ids that do not exist / have no archive are skipped automatically
+    # (python check_ensemble_sources.py shows which ones work and their coverage).
+    ens_models=[
+        "ecmwf_ifs025",                    # ECMWF IFS (physics)
+        "ecmwf_aifs025_single",            # ECMWF AIFS (machine-learning model, archive shorter)
+        "icon_eu",                         # DWD ICON-EU 7 km
+        "gfs_global",                      # NOAA GFS
+        "meteofrance_arpege_europe",       # Meteo-France ARPEGE
+        "ukmo_global_deterministic_10km",  # UK Met Office
+        "gem_global",                      # Environment Canada GEM
+        "jma_gsm",                         # Japan JMA GSM (coarse, but independent)
+    ],
+    ens_lagged=True,             # also use the run one day older of every model (time-lagged members)
+    ens_window_days=90,          # training: last N days ...
+    ens_season_days=45,          # ... + same season (+/- N days) in earlier years (archive from Jan 2024)
+    ens_min_rows=120,            # minimum complete training rows, else fallback
+    ens_min_models=2,            # minimum number of different weather centres
+    ens_min_coverage=0.6,        # a member is used only if present in >= 60% of the training rows
+    ens_ridge=0.05,              # shrinks the combination weights towards equal weights
+    ens_dist="normal",           # "normal" (EMOS) | "empirical" (mu + sigma * standardised residual quantiles)
+    ens_obs_lag=False,           # add the last observed same-hour value to the mean (persistence)
+    ens_compare_equal=True,      # also compute "ens_eq" (same EMOS, equal weights) for comparison
 
     # ---------------------------------------------- NWP (Open-Meteo, ECMWF) --
     nwp_enabled=True,
     nwp_url="https://previous-runs-api.open-meteo.com/v1/forecast",
     nwp_model="ecmwf_ifs025",
     nwp_start_date="2024-01-01",  # archive of the Previous Runs API
-    nwp_max_lead_day=3,          # Fri = d2, Sat = d3
+    nwp_max_lead_day=3,          # Fri = d2, Sat = d3 (the ensemble downloads one more day if ens_lagged)
     nwp_chunk_days=90,           # days per request
     nwp_refresh_days=7,          # re-download the last N days on every run
+    nwp_pause_s=0.3,             # pause between requests (Open-Meteo rate limits)
 
     # ---------------------------------------------- Paired comparisons --
     # (target, reference, candidate); "model" = what is submitted
     comparisons=[
         ("demand", "lagonly", "model"),
         ("res_demand", "lagonly", "model"),
+        ("temperature", "enhanced", "model"),
         ("temperature", "mos", "model"),
-        ("temperature", "lagreg", "model"),
+        ("temperature", "ens_eq", "model"),
+        ("wind", "enhanced", "model"),
         ("wind", "mos", "model"),
-        ("wind", "lagreg", "model"),
+        ("wind", "ens_eq", "model"),
     ],
     bootstrap_block_days=28,
     bootstrap_n=2000,

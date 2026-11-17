@@ -1,13 +1,16 @@
 """
-NWP data (v2): ECMWF IFS 0.25 deg forecasts from the Open-Meteo Previous Runs API.
+NWP data (v3): forecasts from the Open-Meteo Previous Runs API.
 
 To train a model on weather FORECASTS we need historical forecasts issued at the same lead time
 as the real ones. The Previous Runs API stores "<var>_previous_dayN" = value forecast N days
 before the valid day (archive from Jan 2024); "<var>" alone is the latest run.
-We standardise the columns to "<name>_d<N>" (N = 0 latest run, 1..3 lead days).
+We standardise the columns to "<name>_d<N>" (N = 0 latest run, 1..L lead days).
 
 Lead day = calendar days between the submission Wednesday and the target day (UTC):
 Friday -> d2, Saturday -> d3. The same column is used in training and in real time.
+
+v3: fetch_point() takes any Open-Meteo model id, so the same cache/refresh logic serves the
+multi-model ensemble (ptsfc/ensemble.py). Cache files: data/nwp_<model>_<point>_<var>.pkl.
 """
 import os
 import time
@@ -20,14 +23,19 @@ from .utils import msg
 
 
 def _get(url, params, tries=3):
+    last = None
     for i in range(tries):
         try:
             r = requests.get(url, params=params, timeout=90)
+            if r.status_code == 400:            # bad model id / variable / date: retrying does not help
+                raise ValueError(r.json().get("reason", r.text[:200]))
             r.raise_for_status()
             js = r.json()
             if isinstance(js, dict) and js.get("error"):
                 raise RuntimeError(js.get("reason"))
             return js
+        except ValueError:
+            raise
         except Exception as e:  # noqa: BLE001
             last = e
             time.sleep(2 * (i + 1))
@@ -41,27 +49,44 @@ def _to_frame(js):
                          for k, vals in h.items() if k != "time"}, index=idx)
 
 
-def fetch_point(cfg, name, lat, lon, var, end):
-    """Hourly series of one variable at one location, all lead days; cached in data/ and refreshed incrementally."""
-    L = cfg["nwp_max_lead_day"]
+def fetch_point(cfg, name, lat, lon, var, end, model=None, max_lead=None):
+    """
+    Hourly series of one variable at one location, all lead days; cached in data/ and refreshed incrementally.
+    model: Open-Meteo model id (default cfg["nwp_model"]); max_lead: last lead day (default cfg["nwp_max_lead_day"]).
+    Returns columns x_d0..x_d<max_lead>.
+    """
+    model = model or cfg["nwp_model"]
+    L = max_lead or cfg["nwp_max_lead_day"]
     cols = [var] + [f"{var}_previous_day{k}" for k in range(1, L + 1)]
-    path = os.path.join(cfg["dir_data"], f"nwp_{cfg['nwp_model']}_{name}_{var}.pkl")
+    path = os.path.join(cfg["dir_data"], f"nwp_{model}_{name}_{var}.pkl")
     cache = pd.read_pickle(path) if os.path.exists(path) else None
 
     if not cfg["offline"]:
         start = pd.Timestamp(cfg["nwp_start_date"])
+        if cache is not None and not set(cols) <= set(cache.columns):
+            msg("NWP %s %s %s: new lead days requested -> full download", model, name, var)
+            cache = None
+        if cache is not None and cache.dropna(how="all").empty:
+            cache = None
         if cache is not None:   # re-download the recent past + the future (forecasts still change)
             last = min(cache.dropna(how="all").index.max().tz_localize(None), pd.Timestamp.today()).normalize()
             start = max(start, last - pd.Timedelta(days=cfg["nwp_refresh_days"]))
-        parts, s = [], start
+        parts, s, n_fail = [], start, 0
         while s <= end:
             e = min(end, s + pd.Timedelta(days=cfg["nwp_chunk_days"] - 1))
-            p = dict(latitude=f"{lat:.4f}", longitude=f"{lon:.4f}", hourly=",".join(cols), models=cfg["nwp_model"],
+            p = dict(latitude=f"{lat:.4f}", longitude=f"{lon:.4f}", hourly=",".join(cols), models=model,
                      wind_speed_unit="ms", timezone="GMT", start_date=f"{s:%Y-%m-%d}", end_date=f"{e:%Y-%m-%d}")
             try:
                 parts.append(_to_frame(_get(cfg["nwp_url"], p)))
+            except ValueError as ex:            # invalid request: usually unknown model id -> stop for this model
+                n_fail += 1
+                msg("WARNING: NWP %s %s %s..%s rejected (%s)", model, name, s.date(), e.date(), ex)
+                if "model" in str(ex).lower():
+                    break
             except Exception as ex:  # noqa: BLE001
-                msg("WARNING: NWP %s %s..%s failed (%s)", name, s.date(), e.date(), ex)
+                n_fail += 1
+                msg("WARNING: NWP %s %s %s..%s failed (%s)", model, name, s.date(), e.date(), ex)
+            time.sleep(cfg.get("nwp_pause_s", 0.0))
             s = e + pd.Timedelta(days=1)
         if parts:
             new = pd.concat(parts)
@@ -69,8 +94,8 @@ def fetch_point(cfg, name, lat, lon, var, end):
             cache = new if cache is None else new.combine_first(cache).sort_index()   # new values win
             cache.to_pickle(path)
 
-    if cache is None:
-        raise RuntimeError(f"no NWP data for {name} ({var})")
+    if cache is None or cache.reindex(columns=cols).dropna(how="all").empty:
+        raise RuntimeError(f"no NWP data for {name} ({model}, {var})")
     out = cache.reindex(columns=cols)
     out.columns = [f"x_d{k}" for k in range(L + 1)]
     return out
@@ -124,12 +149,20 @@ def load_energy_nwp(cfg, end):
 
 
 def load_nwp(cfg, fd):
-    """dict(station=..., energy=...); an entry is None if its data are unavailable (models then fall back)."""
-    NWP = dict(station=None, energy=None)
+    """
+    dict(station=..., energy=..., ens=...); an entry is None if its data are unavailable (models then fall back).
+    ens = multi-model station forecasts for the weather ensemble (only if weather_method == "ensemble").
+    """
+    from .ensemble import load_station_ensemble   # local import: ensemble imports this module
+
+    NWP = dict(station=None, energy=None, ens=None)
     if not cfg["nwp_enabled"]:
         return NWP
     end = max(pd.Timestamp.today().normalize(), fd) + pd.Timedelta(days=5)
-    for key, fun in (("station", load_station_nwp), ("energy", load_energy_nwp)):
+    loaders = [("station", load_station_nwp), ("energy", load_energy_nwp)]
+    if cfg.get("weather_method") == "ensemble":
+        loaders.append(("ens", load_station_ensemble))
+    for key, fun in loaders:
         try:
             NWP[key] = fun(cfg, end)
         except Exception as e:  # noqa: BLE001

@@ -1,5 +1,5 @@
 """
-MODELS (v2) - still deliberately simple.
+MODELS (v3) - still deliberately simple.
 
 ENERGY (demand, res_demand): one multiple linear regression per target slot
     y(day, hour) = b0 + b1 * y(last complete day, same hour) + b2 * y(same slot one week earlier)
@@ -10,6 +10,13 @@ ENERGY (demand, res_demand): one multiple linear regression per target slot
     "lagonly" = the same regression without weather (the v1 model), kept for comparison.
 
 WEATHER (temperature, wind): cfg["weather_method"] chooses the model that is submitted ("model"):
+    "ensemble" (v3): multi-model EMOS (ptsfc/ensemble.py). Forecasts of several weather centres
+               (ECMWF IFS + AIFS, DWD ICON, NOAA GFS, Meteo-France, UK Met Office, ...) are combined
+               with learned weights, bias-corrected, and the predictive spread grows with the
+               disagreement between the centres. Fitted by minimum CRPS.
+               "ens_eq" = the same model with equal weights (shows what the learned weights add).
+               Falls back to MOS -> enhanced -> lagreg if it cannot be fitted (MOS is much better than
+               enhanced at 2-3 days, backtest 18.11.2026).
     "enhanced" (v2b): OLS on the last two observed same-clock-hour values, variant chosen with
                cfg["weather_enhanced_variant"] (a string, or a dict per variable):
                  lag2          two lags, same-season training window (+/- weather_season_days)
@@ -22,10 +29,11 @@ WEATHER (temperature, wind): cfg["weather_method"] chooses the model that is sub
                season in earlier years (forecast archive from Jan 2024). Wind on a square-root scale.
     "lagreg" = v1 regression on the last observed same-hour value (same-season training), kept as
                fallback (no forecast data) and for comparison.
-    The models that are not submitted are still written as extra rows ("mos", "lagreg") for comparison.
+    The models that are not submitted are still written as extra rows for comparison.
 
 UNCERTAINTY (all targets): q_tau = point forecast + spread * empirical tau-quantile of the residuals.
     v2 uses leave-one-out residuals (out-of-sample errors), so the spreads go back to 1.0.
+    The ensemble uses its own predictive distribution (normal, sigma depends on the model spread).
 
 Every forecast only uses information available on the submission Wednesday, so the same
 functions are reused for the backtest (just call them with a past Wednesday). live=True is only
@@ -33,12 +41,15 @@ used for the real submission: it allows the latest forecast run to fill gaps in 
 
 COEFFICIENTS: pass a list as `coefs` and every regression appends its coefficient table
 (beta, se, t, impact = beta * sd of the regressor) -> saved as output/coefficients_<date>.csv.
+For the ensemble: the weight of every source (w_<model>|d<k>), bias (intercept, scale_b) and
+spread terms (sigma_const, sigma_per_spread).
 """
 import numpy as np
 import pandas as pd
 
 from config import HORIZONS, QCOLS, QUANTILES
 from .data_nwp import nwp_at
+from .ensemble import forecast_ensemble
 from .utils import is_special_day, ols_quantiles, ols_table, wday_u
 
 DAY, H = pd.Timedelta(days=1), pd.Timedelta(hours=1)
@@ -50,7 +61,9 @@ ENH_MIN_ROWS = 30   # minimum training rows for the enhanced weather regression
 ENH_VARIANTS = ("lag2", "full_lag2", "fourier", "fourier_lag1")
 
 # weather_method -> models tried in order; the first one that works is submitted as "model"
-WEATHER_ORDER = {"enhanced": ("enhanced", "mos", "lagreg"), "mos": ("mos", "lagreg"), "lagreg": ("lagreg",)}
+WEATHER_ORDER = {"ensemble": ("ensemble", "mos", "enhanced", "lagreg"),   # MOS >> enhanced in the backtest
+                 "enhanced": ("enhanced", "mos", "lagreg"), "mos": ("mos", "lagreg"), "lagreg": ("lagreg",)}
+WEATHER_EXTRA = ("ensemble", "ens_eq", "enhanced", "mos", "lagreg")   # extra rows for comparison
 
 
 def lead_day(fd, day, cfg):
@@ -198,7 +211,7 @@ def forecast_weather_enhanced(W, var, fd, T, t0, cfg, coefs=None, horizon=None):
     return np.clip(q, 0, None) if var == "wind" else q
 
 
-def forecast_weather(W, var, fd, horizon, cfg, S=None, live=False, coefs=None):
+def forecast_weather(W, var, fd, horizon, cfg, S=None, live=False, coefs=None, E=None):
     s = W[var]
     t0 = s.loc[: fd.tz_localize("UTC") - H].last_valid_index()   # last DWD obs on Wednesday (Tue 23 UTC)
     T = (fd + DAY).tz_localize("UTC") + horizon * H                # target time in UTC
@@ -230,12 +243,17 @@ def forecast_weather(W, var, fd, horizon, cfg, S=None, live=False, coefs=None):
     if coefs is not None and not np.isnan(x_new) and ok.sum() > 2:
         tabs["lagreg"] = [dict(origin=fd, target=var, horizon=horizon, **r)
                           for r in ols_table(x[ok, None], y[ok], ["y_lag"])]
-    if method in ("mos", "enhanced") and S is not None:            # v2: MOS on the ECMWF forecast
+    if method in ("mos", "enhanced", "ensemble") and S is not None:   # v2: MOS on the ECMWF forecast
         tabs["mos"] = [] if coefs is not None else None
         cand["mos"] = forecast_mos(W, S, var, fd, T, t0, cfg, live, tabs["mos"], horizon)
-    if method == "enhanced":                                       # v2b: enhanced lag regression
+    if method in ("enhanced", "ensemble"):                         # v2b: enhanced lag regression
         tabs["enhanced"] = [] if coefs is not None else None
         cand["enhanced"] = forecast_weather_enhanced(W, var, fd, T, t0, cfg, tabs["enhanced"], horizon)
+    if method == "ensemble" and E is not None:                     # v3: multi-model EMOS
+        tabs["ensemble"] = [] if coefs is not None else None
+        cand["ensemble"] = forecast_ensemble(W, E, var, fd, T, t0, cfg, live, tabs["ensemble"], horizon)
+        if cfg.get("ens_compare_equal", False):
+            cand["ens_eq"] = forecast_ensemble(W, E, var, fd, T, t0, cfg, live, equal=True)
     final = next(m for m in WEATHER_ORDER.get(method, ("lagreg",)) if cand.get(m) is not None)
 
     if coefs is not None:
@@ -245,10 +263,10 @@ def forecast_weather(W, var, fd, horizon, cfg, S=None, live=False, coefs=None):
             coefs += tab or []
 
     meta = dict(target=var, horizon=horizon, target_time=f"{T:%Y-%m-%d %H:%M} UTC", obs=s.get(T, np.nan))
-    rows = [dict(meta, model="model", **dict(zip(QCOLS, cand[final]))),
+    rows = [dict(meta, model="model", method=final, **dict(zip(QCOLS, cand[final]))),   # method = which model
             dict(meta, model="climatology", **dict(zip(QCOLS, clim)))]
     rows += [dict(meta, model=m, **dict(zip(QCOLS, cand[m])))      # models not submitted, only for comparison
-             for m in ("mos", "lagreg") if m != final and cand.get(m) is not None]
+             for m in WEATHER_EXTRA if m != final and cand.get(m) is not None]
     return rows
 
 
@@ -262,5 +280,5 @@ def forecast_all(ED, W, cfg, fd, NWP=None, live=False, energy=True, weather=True
                 rows += forecast_energy(ED, col, fd, h, cfg, NWP.get("energy"), live, coefs)
         if weather:
             for var in ("temperature", "wind"):
-                rows += forecast_weather(W, var, fd, h, cfg, NWP.get("station"), live, coefs)
+                rows += forecast_weather(W, var, fd, h, cfg, NWP.get("station"), live, coefs, NWP.get("ens"))
     return pd.DataFrame(rows)
