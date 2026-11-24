@@ -47,7 +47,7 @@ DAY, H = pd.Timedelta(days=1), pd.Timedelta(hours=1)
 ENERGY_SLOTS = {36: (2, 12), 40: (2, 16), 44: (2, 20), 60: (3, 12), 64: (3, 16), 68: (3, 20)}
 MIN_ROWS = 30       # minimum training rows for the regression with weather regressors
 ENH_MIN_ROWS = 30   # minimum training rows for the enhanced weather regression
-ENH_VARIANTS = ("lag2", "full_lag2", "fourier", "fourier_lag1")
+ENH_VARIANTS = ("lag2", "full_lag2", "fourier", "fourier_lag1", "full_lag1")
 
 # weather_method -> models tried in order; the first one that works is submitted as "model"
 WEATHER_ORDER = {"enhanced": ("enhanced", "mos", "lagreg"), "mos": ("mos", "lagreg"), "lagreg": ("lagreg",)}
@@ -176,7 +176,7 @@ def forecast_weather_enhanced(W, var, fd, T, t0, cfg, coefs=None, horizon=None):
 
     y = s.reindex(Td).to_numpy(float)
     cols, x_new, names = [s.reindex(Td - lag1).to_numpy(float)], [s.get(T - lag1, np.nan)], ["y_lag1"]
-    if variant != "fourier_lag1":
+    if variant not in ("fourier_lag1", "full_lag1"):
         cols.append(s.reindex(Td - lag2).to_numpy(float))
         x_new.append(s.get(T - lag2, np.nan))
         names.append("y_lag2")
